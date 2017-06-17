@@ -11,7 +11,7 @@ interface PlatformInterface {
     public function checkCredentials();
 
     /**
-     * Get all posts, including drafts.
+     * Get all Posts, including drafts.
      *
      * @return array
      */

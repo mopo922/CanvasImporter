@@ -35,7 +35,12 @@ class Import extends Command
     public function handle()
     {
         $source = $this->choice('Platform of the blog to import:', [self::PLATFORM_WORDPRESS]);
+
         $url = $this->ask('URL of the blog to import:');
+        $parsedUrl = parse_url($url);
+        if (!isset($parsedUrl['scheme'])) {
+            $url = 'http://' . $url;
+        }
 
         switch ($source) {
             case self::PLATFORM_WORDPRESS:
