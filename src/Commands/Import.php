@@ -3,6 +3,7 @@
 namespace CanvasImporter\Commands;
 
 use Canvas\Models\Post;
+use CanvasImporter\Platform\WordPress as WordPressPlatform;
 use Illuminate\Console\Command;
 
 class Import extends Command
@@ -59,15 +60,16 @@ class Import extends Command
             $postCount = count($posts);
             $bar = $this->output->createProgressBar($postCount);
 
-            foreach ($posts as $post) {
-                $post = Post::create($this->platform->convertToCanvas($post));
-                $post->syncTags($post['tags']);
+            foreach ($posts as $platformPost) {
+                $platformPost = $this->platform->convertToCanvas($platformPost);
+                $post = Post::create($platformPost);
+                $post->syncTags($platformPost['tags']);
 
                 $bar->advance();
             }
 
             $bar->finish();
-            $this->info($postCount . ' posts imported.');
+            $this->info("\n" . $postCount . ' posts imported.');
         } else {
             $this->error('Invalid credentials provided.');
         }
@@ -83,6 +85,6 @@ class Import extends Command
         $username = $this->ask('WordPress admin username:');
         $password = $this->secret('WordPress admin password:');
 
-        $this->platform = new Platform\WordPress($url, $username, $password);
+        $this->platform = new WordPressPlatform($url, $username, $password);
     }
 }

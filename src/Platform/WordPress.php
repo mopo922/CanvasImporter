@@ -4,10 +4,16 @@ namespace CanvasImporter\Platform;
 
 use Canvas\Models\User;
 use GuzzleHttp\Client as Guzzle;
+use GuzzleHttp\Exception\ClientException as GuzzleException;
 use League\HTMLToMarkdown\HtmlConverter;
+use Exception;
+use Log;
 
 class WordPress implements PlatformInterface
 {
+    /** @var int MAX_PER_PAGE The WP API won't allow you to get any more than 100 per page. */
+    const MAX_PER_PAGE = 100;
+
     /** @var string $apiUrl API URL of the blog to be imported. */
     private $apiUrl;
 
@@ -47,7 +53,7 @@ class WordPress implements PlatformInterface
      */
     public function __construct(string $url, string $username, string $password)
     {
-        $this->apiUrl = $url . 'wp-json/wp/v2/';
+        $this->apiUrl = rtrim($url, '/') . '/wp-json/wp/v2/';
         $this->username = $username;
         $this->password = $password;
         $this->client = new Guzzle();
@@ -58,10 +64,15 @@ class WordPress implements PlatformInterface
     /**
      *
      */
-    private function endpoint(string $endpoint, $params)
+    private function endpoint(string $endpoint, $params = null)
     {
         $endpoint = strtolower($endpoint);
-        $validEndpoints = ['posts'];
+        $validEndpoints = [
+            'categories',
+            'posts',
+            'tags',
+            'users',
+        ];
 
         if (!in_array($endpoint, $validEndpoints)) {
             abort(500, 'Invalid endpoint requested.');
@@ -80,16 +91,33 @@ class WordPress implements PlatformInterface
     /**
      *
      */
-    private function get(string $endpoint, $params)
+    private function get(string $endpoint, $params = null, $page = 1)
     {
         try {
-            $result = $this->client->request(
+            if (empty($params)) {
+                $params = [];
+            }
+
+            if (is_array($params)) {
+                $params['context'] = 'edit'; // show full details
+                $params['page'] = $page;
+                $params['per_page'] = self::MAX_PER_PAGE;
+            }
+
+            $response = $this->client->request(
                 'GET',
                 $this->endpoint($endpoint, $params),
                 ['auth' => [$this->username, $this->password]]
             );
-            return json_decode($result->getBody());
-        } catch (Exception $e) {
+            $results = json_decode($response->getBody(), true);
+
+            if (count($results) == self::MAX_PER_PAGE) {
+                $results = array_merge($results, $this->get($endpoint, $params, $page + 1));
+            }
+
+            return $results;
+        } catch (GuzzleException $e) {
+            Log::debug($e->getResponse()->getBody());
             return [];
         }
     }
@@ -108,7 +136,8 @@ class WordPress implements PlatformInterface
                 ['auth' => [$this->username, $this->password]]
             );
             return true;
-        } catch (Exception $e) {
+        } catch (GuzzleException $e) {
+            Log::debug($e->getResponse()->getBody());
             return false;
         }
     }
@@ -122,7 +151,7 @@ class WordPress implements PlatformInterface
     {
         if (!is_array($this->posts)) {
             $this->posts = $this->get('posts', [
-                'status' => 'draft,publish',
+                'status' => 'publish,draft',
                 'type' => 'post',
             ]);
         }
@@ -169,6 +198,24 @@ class WordPress implements PlatformInterface
     }
 
     /**
+     * Get a specific Category by ID. Categories that are not currently used by a published
+     * Post are not returned in getCategories(), so they have to be fetched individually.
+     *
+     * @param int $categoryId Category ID to find.
+     * @return array Category data for the requested ID.
+     */
+    private function getCategory(int $categoryId)
+    {
+        $this->getCategories();
+
+        if (!isset($this->categories[$categoryId])) {
+            $this->categories[$categoryId] = $this->get('categories', $categoryId);
+        }
+
+        return $this->categories[$categoryId];
+    }
+
+    /**
      * Get all Tags from WordPress.
      *
      * @return array
@@ -187,6 +234,24 @@ class WordPress implements PlatformInterface
     }
 
     /**
+     * Get a specific Tag by ID. Tags that are not currently used by a published
+     * Post are not returned in getTags() so they have to be fetched individually.
+     *
+     * @param int $tagId Tag ID to find.
+     * @return array Tag data for the requested ID.
+     */
+    private function getTag(int $tagId)
+    {
+        $this->getTags();
+
+        if (!isset($this->tags[$tagId])) {
+            $this->tags[$tagId] = $this->get('tags', $tagId);
+        }
+
+        return $this->tags[$tagId];
+    }
+
+    /**
      * Convert post data from platform's format to Canvas's format.
      *
      * @param array $post Array of data from the platform.
@@ -196,14 +261,14 @@ class WordPress implements PlatformInterface
     {
         return [
             'user_id' => $this->getUserId($post),
-            'slug' => $post['slug'],
-            'title' => $post['title']['rendered'],
+            'slug' => $this->getSlug($post),
+            'title' => $post['title']['raw'],
             // 'subtitle' => '',
             'content_raw' => $this->getContentMarkdown($post),
             'page_image' => $this->getFeaturedImage($post),
             // 'meta_description' => '',
             'is_published' => $post['status'] === 'publish',
-            'layout' => config('blog.post_layout');
+            'layout' => config('blog.post_layout'),
             'published_at' => str_replace('T', ' ', $post['date_gmt']),
             'tags' => $this->getCombinedTags($post),
         ];
@@ -221,6 +286,29 @@ class WordPress implements PlatformInterface
         $user = User::where('email', $userEmail)->first();
 
         return $user ? $user->id : 1;
+    }
+
+    /**
+     * Get the Post slug.
+     *
+     * @param array $post Array of data from the platform.
+     * @return string Slug for Canvas to use.
+     */
+    private function getSlug(array $post)
+    {
+        if (!empty($post['slug'])) {
+            $slug = $post['slug'];
+        } else {
+            $slug = strtolower(trim($post['title']['raw']));
+            // the different parts of times & ratios should remain separated
+            $slug = preg_replace('/(?<=\d):(?=\d)/', '-', $slug);
+            // all other special chars simply get stripped out
+            $slug = preg_replace('/[^a-z\d\- ]/i', '', $slug);
+            // replace spaces, accounting for the possibilities of multiple spaces, or spaces & dashes
+            $slug = preg_replace('/ [\- ]*/', '-', $slug);
+        }
+
+        return $slug;
     }
 
     /**
@@ -247,10 +335,10 @@ class WordPress implements PlatformInterface
         $tags = [];
 
         foreach ($post['categories'] as $categoryId) {
-            $tags[] = $this->formatTagName($this->getCategories()[$categoryId]['name']);
+            $tags[] = $this->formatTagName($this->getCategory($categoryId)['name']);
         }
         foreach ($post['tags'] as $tagId) {
-            $tags[] = $this->formatTagName($this->getTags()[$tagId]['name']);
+            $tags[] = $this->formatTagName($this->getTag($tagId)['name']);
         }
 
         return array_unique($tags);
