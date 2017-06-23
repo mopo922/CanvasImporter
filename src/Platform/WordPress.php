@@ -57,8 +57,14 @@ class WordPress implements PlatformInterface
         $this->username = $username;
         $this->password = $password;
         $this->client = new Guzzle();
-        $this->publicPath = '/import/' . date('Y-m-d') . '/';
-        $this->storagePath = storage_path('app/public' . $this->publicPath);
+
+        $path = '/import/' . date('Y-m-d') . '/';
+        $this->publicPath = '/storage' . $path;
+        $this->storagePath = storage_path('app/public' . $path);
+
+        if (!is_dir($this->storagePath)) {
+            mkdir($this->storagePath, 0755, true);
+        }
     }
 
     /**
@@ -320,8 +326,26 @@ class WordPress implements PlatformInterface
     private function getContentMarkdown(array $post)
     {
         $converter = new HtmlConverter(['strip_tags' => true]);
+        $markdown = $converter->convert($post['content']['rendered']);
 
-        return $converter->convert($post['content']['rendered']);
+        // @TODO THIS CAN BE MORE ROBUST
+        $images = [];
+        preg_match_all('/\[\!\[.*\]\(.*\)\]\(.*\)/', $markdown, $images);
+        foreach ($images[0] as $imageMarkdown) {
+            $start = strpos($imageMarkdown, '](') + 2;
+            $end = strpos($imageMarkdown, ')', $start);
+            $length = $end - $start;
+            $url = substr($imageMarkdown, $start, $length);
+            // Remove size
+            $originalUrl = preg_replace('/\-[\d]{2,3}x[\d]{2,3}(?=\.[\w]{3,4}$)/', '', $url);
+
+            $path = $this->downloadImage($originalUrl);
+
+            $markdown = str_replace($url, config('app.url') . $path, $markdown);
+            // $markdown = str_replace($originalUrl, config('app.url') . $path, $markdown);
+        }
+
+        return $markdown;
     }
 
     /**
@@ -367,14 +391,30 @@ class WordPress implements PlatformInterface
 
         if ($post['featured_media']) {
             $media = $this->get('media', $post['featured_media']);
-            $target = str_replace('/', '-', $media['media_details']['file']);
-            copy(
-                $media['source_url'],
-                $this->storagePath . $target
-            );
-            $pageImage = $this->publicPath . $target;
+            $pageImage = $this->downloadImage($media['source_url']);
         }
 
         return $pageImage;
+    }
+
+    /**
+     *
+     */
+    private function downloadImage(string $url)
+    {
+        $matches = [];
+        preg_match('/\d{4}\/\d{2}\/.*\.\w{3,4}$/', $url, $matches);
+        $target = str_replace('/', '-', $matches[0]);
+
+        try {
+            copy(
+                $url,
+                $this->storagePath . $target
+            );
+        } catch (Exception $e) {
+            Log::notice('Image download failed for ' . $url . ' - ' . $e->getMessage());
+        }
+
+        return $this->publicPath . $target;
     }
 }

@@ -31,6 +31,9 @@ Run `composer update`.
 After the import is complete, you can remove these lines and run `composer update`
 again if you don't plan on using the importer any more.
 
+Finally, you'll want to make sure `config('app.url')` is defined properly in `config/app.php`,
+otherwise post images won't download or display properly.
+
 ### WordPress
 
 When importing a WordPress blog, you'll need to install this Basic Authentication
